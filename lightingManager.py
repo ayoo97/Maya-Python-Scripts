@@ -1,9 +1,12 @@
+import os
 from Qt import QtWidgets, QtCore, QtGui
 import pymel.core as pm
 from functools import partial
 import Qt
 import logging
 from maya import OpenMayaUI as omui
+import time
+import json
 
 logging.basicConfig()
 logger = logging.getLogger('LightingManager')
@@ -74,7 +77,7 @@ class LightManager(QtWidgets.QWidget):
 
     def populate(self):
         while self.scrollLayout.count():
-            widget = self.scrollLayout.takeAt(0).widet()
+            widget = self.scrollLayout.takeAt(0).widget()
             if widget:
                 widget.setVisible(False)
                 widget.deleteLater()
@@ -87,11 +90,11 @@ class LightManager(QtWidgets.QWidget):
         self.lightTypeCB = QtWidgets.QComboBox()
         for lightType in sorted(self.lightTypes):
             self. lightTypeCB.addItem(lightType)
-        layout.addWidget(self.lightTypeCB, 0, 0)
+        layout.addWidget(self.lightTypeCB, 0, 0, 1, 2)
 
         createBtn = QtWidgets.QPushButton('Create')
         createBtn.clicked.connect(self.createLight)
-        layout.addWidget(createBtn, 0, 1)
+        layout.addWidget(createBtn, 0, 2)
 
         scrollWidget = QtWidgets.QWidget()
         scrollWidget.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Maximum)
@@ -100,19 +103,86 @@ class LightManager(QtWidgets.QWidget):
         scrollArea = QtWidgets.QScrollArea()
         scrollArea.setWidgetResizable(True)
         scrollArea.setWidget(scrollWidget)
-        layout.addWidget(scrollArea, 1, 0, 1, 2)
+        layout.addWidget(scrollArea, 1, 0, 1, 3)
+
+        saveBtn = QtWidgets.QPushButton('Save')
+        saveBtn.clicked.connect(self.saveLights)
+        layout.addWidget(saveBtn, 2, 0)
+
+        importBtn = QtWidgets.QPushButton('Import')
+        importBtn.clicked.connect(self.importLights)
+        layout.addWidget(importBtn, 2, 1)
 
         refreshBtn = QtWidgets.QPushButton('Refresh')
         refreshBtn.clicked.connect(self.populate)
-        layout.addWidget(refreshBtn, 2, 1)
+        layout.addWidget(refreshBtn, 2, 2)
+
+    def saveLights(self):
+        properties = {}
+
+        for lightWidget in self.findChildren(LightWidget):
+            light = lightWidget.light
+            transform = light.getTransform()
+
+            properties[str(transform)] = {
+                'translate' : list(transform.translate.get()),
+                'rotation' : list(transform.rotate.get()),
+                'lightType' : pm.objectType(light),
+                'intensity' : light.intensity.get(),
+                'color' : light.color.get()
+            }
+
+        directory = self.getDirectory()
+
+        lightFile = os.path.join(directory, 'lightFile_%s.json' % time.strftime('%m%d'))
+        with open(lightFile, 'w') as f:
+            json.dump(properties, f, indent = 4)
+
+        logger.info('Saving file to %s' % lightFile)
+
+    def getDirectory(self):
+        directory = os.path.join(pm.internalVar(userAppDir = True), 'lightManager')
+        if not os.path.exists(directory):
+            os.mkdir(directory)
+        return directory
 
 
-    def createLight(self):
-        lightType = self.lightTypeCB.currentText()
+    def importLights(self):
+        directory = self.getDirectory()
+        fileName = QtWidgets.QFileDialog.getOpenFileName(self, "Light Browser", directory)
+        with open(fileName[0], 'r') as f:
+            properties = json.load(f)
+
+        for light, info in properties.items():
+            lightType = info.get('lightType')
+            for lt in self.lightTypes:
+                if ('%sLight' % lt.split()[0].lower()) == lightType:
+                    break
+            else:
+                logger.info('Cannot find a corresponding light type for %s (%s)' % (light, lightType))
+                continue
+
+            light = self.createLight(lightType = lt)
+            light.intensity.set(info.get('intensity'))
+
+            light.color.set(info.get('color'))
+
+            transform = light.getTransform()
+            transform.translate.set(info.get('translate'))
+            transform.rotate.set(info.get('rotation'))
+
+        self.populate()
+
+    def createLight(self, lightType = None, add = True):
+        if not lightType:
+            lightType = self.lightTypeCB.currentText()
         func = self.lightTypes[lightType]
 
         light = func()
-        self.addLight(light)
+        if add:
+            self.addLight(light)
+        
+        return light
 
     def addLight(self, light):
         widget = LightWidget(light)
@@ -134,6 +204,8 @@ class LightWidget(QtWidgets.QWidget):
         super(LightWidget, self).__init__()
         if isinstance(light, basestring):
             light = pm.PyNode(light)
+        if isinstance(light, pm.nodetypes.Transform):
+            light = light.getShape()
         
         self.light = light
         self.buildUI()
